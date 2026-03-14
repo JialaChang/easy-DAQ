@@ -4,6 +4,7 @@ import threading
 import platform
 import os
 import time
+from collections import deque
 
 
 """ --- 網路通訊 --- """
@@ -13,7 +14,7 @@ class NetworkClient:
         self.s = None
         self.is_connected = False
         
-        # 藉由 callback 的方法調用 AppWindow 的 handle_incoming, 避免模組間的強耦合
+        # 藉由 callback 的方法調用 AppWindow 的 handle_incoming
         self.on_receive = on_receive_callback   
 
 
@@ -21,15 +22,18 @@ class NetworkClient:
         """建立連線"""
 
         try:
-            # AF_INET : IPv4 協定 ; SOCK_STREAM : TCP 協定
-            self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  
-            self.s.connect((ip, int(port)))
-            self.is_connected = True
 
+            # AF_INET : IPv4 協定 ; SOCK_STREAM : TCP 協定
+            self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # 避免連線超時
+            self.s.settimeout(5.0)
+            self.s.connect((ip, int(port)))
+            
             # 用threading建立多執行緒接收資料
             self.receive_thread = threading.Thread(target=self.receive_data, daemon=True) 
             self.receive_thread.start()
 
+            self.is_connected = True
             return True, ""
             
         except Exception as e:
@@ -119,37 +123,62 @@ class AppWindow:
 
         # 建立主視窗 UI, DearPyGui 底層是 C++ 因此不用 (用self) 儲存 Python 物件
         with dpg.window(tag="primary_window"):
+            with dpg.tab_bar(tag="main_tab"):
 
-            # 水平輸入欄
-            with dpg.group(horizontal=True):
-                dpg.add_text("IP :")
-                dpg.add_input_text(tag="entry_ip", width=150)
+                # 設定與日誌分頁
+                with dpg.tab(label="Logs", tag="tab_logs"):
+                    dpg.add_spacer(height=5)
 
-                dpg.add_text("port :")
-                dpg.add_input_text(tag="entry_port", width=80)
+                    # 水平輸入欄
+                    with dpg.group(horizontal=True):
 
-                dpg.add_text(" " * 5)    # 用空格做間距
-                dpg.add_combo(
-                    items=["Text(UTF-8)", "Hex", "Binary"],
-                    tag="combo_format",
-                    width=120
-                )
+                        # IP 輸入
+                        dpg.add_text("IP :")
+                        dpg.add_input_text(tag="entry_ip", width=150)
 
-                dpg.add_text(" " * 5) 
-                dpg.add_button(label="Save", tag="btn_setip", callback=self.save_setting) 
+                        # port 輸入
+                        dpg.add_text("port :")
+                        dpg.add_input_text(tag="entry_port", width=80)
 
-                dpg.add_text(" " * 20)
-                dpg.add_button(label="Connect", tag="btn_connect", callback=self.toggle_connection)
+                        # 輸出格式選擇
+                        dpg.add_text(" " * 5)    # 用空格做間距
+                        dpg.add_combo(
+                            items=["Text(UTF-8)", "Hex", "Binary"],
+                            tag="combo_format",
+                            width=120
+                        )
 
-                dpg.add_text(" " * 20)
-                dpg.add_text("0", tag="display_cps")
-                dpg.add_text("cnt/sec")
+                        # 儲存設定按鈕
+                        dpg.add_text(" " * 5) 
+                        dpg.add_button(label="Save", tag="btn_setip", callback=self.save_setting) 
 
-            # 滾動窗
-            # 寬設 -1 填滿剩下的空間
-            # 高設 -40 填滿後留 40px
-            with dpg.child_window(tag="log_window", width=-1, height=-40):
-                pass
+                        # 切換連線按鈕
+                        dpg.add_text(" " * 20)
+                        dpg.add_button(label="Connect", tag="btn_connect", callback=self.toggle_connection)
+
+                        # 訊息輸出次數顯示
+                        dpg.add_text(" " * 20)
+                        dpg.add_text("0", tag="display_cps")
+                        dpg.add_text("cnt/sec")
+
+                    # 滾動窗
+                    # 寬設 -1 填滿剩下的空間
+                    # 高設 -40 填滿後留 200px
+                    dpg.add_spacer(height=5)
+                    with dpg.child_window(tag="log_window", width=-1, height=-200):
+                        pass
+                
+                # 圖表分頁
+                with dpg.tab(label="Plot", tag="tab_plot"):
+                    dpg.add_spacer(height=5)
+
+                    # 壓力傳感器圖表
+                    with dpg.plot(label="Pressure Sensor", width=-1, height=-1):
+                        dpg.add_plot_legend()
+
+                        dpg.add_plot_axis(dpg.mvXAxis, label="Time", tag="pressure_xaxis")
+                        with dpg.plot_axis(dpg.mvYAxis, label="Value", tag="pressure_yaxis"):
+                            pass
 
         # 建立視窗
         dpg.create_viewport(title="Network", width=800, height=500)
@@ -194,6 +223,7 @@ class AppWindow:
     def toggle_connection(self):
         """切換連線按鈕"""
 
+        # 沒連線
         if not self.network.is_connected:
             self.output_message("[System] : Trying to connect...")
             connect_success, msg = self.network.establish_connect(self.target_ip, self.target_port)
@@ -204,6 +234,7 @@ class AppWindow:
             else:
                 self.output_message(f"[System] : Connect failed -- {msg}")
 
+        # 有連線
         else:
             self.network.stop_connect()
             dpg.set_item_label("btn_connect", "Connect")        
@@ -211,24 +242,24 @@ class AppWindow:
 
 
     def handle_incoming(self, data):
-        """處理 NetworkClient 下 receive_data 接收的資料"""
+        """處理 NetworkClient 接收的資料"""
 
+        # 檢查斷線或錯誤
         if data == None:
             dpg.set_item_label("btn_connect", "Connect")        
             self.output_message("[System] : Sever disconnect")
             return
         
-        elif isinstance(data, Exception):
+        if isinstance(data, Exception):
             self.output_message(f"[System] : Error -- {data}")
             return
         
-        else:
-            self.cnt_persec += 1
+        self.cnt_persec += 1
 
-            # 每接收十筆才輸出一次
-            if (self.cnt_persec % 10 == 0):    
-                output_data = self.processor.format_output(data, self.data_format)
-                self.output_message(output_data)
+        # 每接收十筆才輸出一次
+        if (self.cnt_persec % 10 == 0):    
+            output_data = self.processor.format_output(data, self.data_format)
+            self.output_message(output_data)
 
 
     def cps_monitor(self):
@@ -248,11 +279,11 @@ class AppWindow:
         dpg.add_text(message, parent="log_window")
         dpg.set_y_scroll("log_window", 999999)
 
+        # 最多顯示 500 筆
         if len(dpg.get_item_children("log_window", 1)) > 500:
             dpg.delete_item(dpg.get_item_children("log_window", 1)[0])    # [0] -> 最上面的一行
 
 
-# 執行視窗
-# 只有直接開啟此程式才會執行
+# 執行程式
 if __name__ == "__main__":
     AppWindow()
