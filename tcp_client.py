@@ -3,6 +3,7 @@ import socket
 import threading
 import platform
 import os
+import time
 
 
 """ --- 網路通訊 --- """
@@ -25,10 +26,9 @@ class NetworkClient:
             self.s.connect((ip, int(port)))
             self.is_connected = True
 
-            # 用threading建立多執行緒
-            # daemon=True -> 主執行緒被關閉時, 副執行緒也同樣會被關閉 
-            t = threading.Thread(target=self.receive_data, daemon=True) 
-            t.start()
+            # 用threading建立多執行緒接收資料
+            self.receive_thread = threading.Thread(target=self.receive_data, daemon=True) 
+            self.receive_thread.start()
 
             return True, ""
             
@@ -92,16 +92,23 @@ class DataProcess:
 class AppWindow:
 
     def __init__(self):
-        self.processor = DataProcess()
-        
-        # 將 handle_incoming 這個函式透過 on_receive_callback 交給 NetworkClient
-        self.network = NetworkClient(on_receive_callback=self.handle_incoming)  
-
-        self.setup_gui()
-
         self.target_ip = ""
         self.target_port = ""
         self.data_format = ""
+
+        self.cnt_persec = 0
+        self.curr_cps = 0
+
+        self.processor = DataProcess()
+        
+        # 將 handle_incoming 這個函式透過 on_receive_callback 交給 NetworkClient
+        self.network = NetworkClient(on_receive_callback=self.handle_incoming)
+
+        # 接收資料的執行緒
+        self.cps_thread = threading.Thread(target=self.cps_monitor, daemon=True)
+        self.cps_thread.start()
+
+        self.setup_gui()
 
 
     def setup_gui(self):
@@ -121,7 +128,7 @@ class AppWindow:
                 dpg.add_text("port :")
                 dpg.add_input_text(tag="entry_port", width=80)
 
-                dpg.add_text(" " * 5)   # 用空格做間距
+                dpg.add_text(" " * 5)    # 用空格做間距
                 dpg.add_combo(
                     items=["Text(UTF-8)", "Hex", "Binary"],
                     tag="combo_format",
@@ -134,8 +141,14 @@ class AppWindow:
                 dpg.add_text(" " * 20)
                 dpg.add_button(label="Connect", tag="btn_connect", callback=self.toggle_connection)
 
+                dpg.add_text(" " * 20)
+                dpg.add_text("0", tag="display_cps")
+                dpg.add_text("cnt/sec")
+
             # 滾動窗
-            with dpg.child_window(tag="log_window", width=-1, height=-1):    # 寬高設 -1 填滿剩下的空間
+            # 寬設 -1 填滿剩下的空間
+            # 高設 -40 填滿後留 40px
+            with dpg.child_window(tag="log_window", width=-1, height=-40):
                 pass
 
         # 建立視窗
@@ -155,19 +168,19 @@ class AppWindow:
         with dpg.font_registry():
             font_path = ""
             if platform.system() == "Windows":
-                font_path = "C:/Windows/Fonts/msjh.ttc"  # 微軟正黑體
+                font_path = "C:/Windows/Fonts/msjh.ttc"    # 微軟正黑體
             elif platform.system() == "Darwin":
-                font_path = "/System/Library/Fonts/PingFang.ttc" # Mac 蘋方體
+                font_path = "/System/Library/Fonts/PingFang.ttc"    # Mac 蘋方體
 
             if font_path and os.path.exists(font_path):
-                with dpg.font(font_path, 18) as default_font:   # 字體大小 : 18
+                with dpg.font(font_path, 18) as default_font:    # 字體大小 : 18
                     dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
                     dpg.add_font_range_hint(dpg.mvFontRangeHint_Chinese_Full)
 
                 dpg.bind_font(default_font)
 
 
-    def save_setting(self, *args):   # args 接收傳來的其他參數
+    def save_setting(self, *args):    # args 接收傳來的其他參數
         """儲存設定"""
 
         self.target_ip = dpg.get_value("entry_ip")
@@ -200,18 +213,33 @@ class AppWindow:
     def handle_incoming(self, data):
         """處理 NetworkClient 下 receive_data 接收的資料"""
 
-        if data == None:    # 斷線
+        if data == None:
             dpg.set_item_label("btn_connect", "Connect")        
             self.output_message("[System] : Sever disconnect")
             return
         
-        elif isinstance(data, Exception):   # 錯誤訊息
+        elif isinstance(data, Exception):
             self.output_message(f"[System] : Error -- {data}")
             return
         
         else:
-            output_data = self.processor.format_output(data, self.data_format)
-            self.output_message(output_data)
+            self.cnt_persec += 1
+
+            # 每接收十筆才輸出一次
+            if (self.cnt_persec % 10 == 0):    
+                output_data = self.processor.format_output(data, self.data_format)
+                self.output_message(output_data)
+
+
+    def cps_monitor(self):
+        """更新 cnt/sec 的數值"""
+        while True:
+            time.sleep(1.0)
+
+            self.curr_cps = self.cnt_persec
+            self.cnt_persec = 0
+
+            dpg.set_value("display_cps", str(self.curr_cps))
 
 
     def output_message(self, message):
@@ -221,9 +249,10 @@ class AppWindow:
         dpg.set_y_scroll("log_window", 999999)
 
         if len(dpg.get_item_children("log_window", 1)) > 500:
-            dpg.delete_item(dpg.get_item_children("log_window", 1)[0]) # [0] -> 最上面的一行
+            dpg.delete_item(dpg.get_item_children("log_window", 1)[0])    # [0] -> 最上面的一行
 
 
 # 執行視窗
+# 只有直接開啟此程式才會執行
 if __name__ == "__main__":
     AppWindow()
