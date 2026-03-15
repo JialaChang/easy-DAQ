@@ -4,7 +4,6 @@ import threading
 import platform
 import os
 import time
-from collections import deque
 
 
 class NetworkClient:
