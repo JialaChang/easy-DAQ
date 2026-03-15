@@ -7,9 +7,9 @@ import time
 from collections import deque
 
 
-""" --- 網路通訊 --- """
 class NetworkClient:
-    
+    """ --- 網路通訊 --- """
+
     def __init__(self, on_receive_callback):
         self.s = None
         self.is_connected = False
@@ -28,12 +28,13 @@ class NetworkClient:
             # 避免連線超時
             self.s.settimeout(5.0)
             self.s.connect((ip, int(port)))
+            self.is_connected = True
+
             
             # 用threading建立多執行緒接收資料
             self.receive_thread = threading.Thread(target=self.receive_data, daemon=True) 
             self.receive_thread.start()
 
-            self.is_connected = True
             return True, ""
             
         except Exception as e:
@@ -75,9 +76,9 @@ class NetworkClient:
         self.is_connected = False
 
     
-""" --- 資料處理 --- """
 class DataProcess:
-
+    """資料處理"""
+    
     def format_output(self, data , data_format):
         """資料輸出型態"""
 
@@ -92,17 +93,52 @@ class DataProcess:
             return (f">> {' '.join(format(byte, '08b') for byte in data)}")
     
 
-""" --- 視窗介面 --- """
+    def extract_force_data(self, data, channel = 1):
+        """分析秤重傳感器的數值"""
+
+        # 通道的起始位置
+        # AD 1 -> byte 6,7,8
+        # AD 2 -> byte 9,10,11
+        # AD 3 -> byte 12,13,14
+        start_idx = 6 + (channel - 1) * 3
+                
+        high = data[start_idx]
+        mid = data[start_idx + 1]
+        low = data[start_idx + 2]
+
+        # 組合成 24bits 的整數
+        row_data = (high << 16) | (mid << 8) | low
+
+        # 檢查正負
+        if row_data >= (1 << 23):
+            force_value = row_data - (1 << 24)
+        else:
+            force_value = row_data
+
+        # 校正數值 -> 換成公克
+        force_value *= (5000.0 / (1 << 23))
+        return force_value
+
+
 class AppWindow:
+    """ --- 視窗介面 --- """
 
     def __init__(self):
+
+        # IP與資料設定
         self.target_ip = ""
         self.target_port = ""
         self.data_format = ""
 
+        # 資料計數器
         self.cnt_persec = 0
         self.curr_cps = 0
 
+        # 繪圖容器
+        self.plot_data_x = []
+        self.plot_data_y = []
+        self.start_time = time.time()
+ 
         self.processor = DataProcess()
         
         # 將 handle_incoming 這個函式透過 on_receive_callback 交給 NetworkClient
@@ -121,7 +157,7 @@ class AppWindow:
         dpg.create_context()
         self.load_font()
 
-        # 建立主視窗 UI, DearPyGui 底層是 C++ 因此不用 (用self) 儲存 Python 物件
+        # 建立主視窗 UI
         with dpg.window(tag="primary_window"):
             with dpg.tab_bar(tag="main_tab"):
 
@@ -134,18 +170,20 @@ class AppWindow:
 
                         # IP 輸入
                         dpg.add_text("IP :")
-                        dpg.add_input_text(tag="entry_ip", width=150)
+                        dpg.add_input_text(tag="entry_ip", width=150, default_value="220.168.8.8")
 
                         # port 輸入
+                        dpg.add_text(" ")
                         dpg.add_text("port :")
-                        dpg.add_input_text(tag="entry_port", width=80)
+                        dpg.add_input_text(tag="entry_port", width=80, default_value="5000")
 
                         # 輸出格式選擇
                         dpg.add_text(" " * 5)    # 用空格做間距
                         dpg.add_combo(
                             items=["Text(UTF-8)", "Hex", "Binary"],
                             tag="combo_format",
-                            width=120
+                            width=120,
+                            default_value="Hex"
                         )
 
                         # 儲存設定按鈕
@@ -153,32 +191,32 @@ class AppWindow:
                         dpg.add_button(label="Save", tag="btn_setip", callback=self.save_setting) 
 
                         # 切換連線按鈕
-                        dpg.add_text(" " * 20)
+                        dpg.add_text(" " * 10)
                         dpg.add_button(label="Connect", tag="btn_connect", callback=self.toggle_connection)
 
                         # 訊息輸出次數顯示
-                        dpg.add_text(" " * 20)
+                        dpg.add_text(" " * 10)
                         dpg.add_text("0", tag="display_cps")
                         dpg.add_text("cnt/sec")
 
                     # 滾動窗
                     # 寬設 -1 填滿剩下的空間
-                    # 高設 -40 填滿後留 200px
+                    # 高設 -200 填滿後留 200px
                     dpg.add_spacer(height=5)
-                    with dpg.child_window(tag="log_window", width=-1, height=-200):
+                    with dpg.child_window(tag="log_window", width=-1, height=-200, horizontal_scrollbar=True):
                         pass
                 
                 # 圖表分頁
                 with dpg.tab(label="Plot", tag="tab_plot"):
                     dpg.add_spacer(height=5)
 
-                    # 壓力傳感器圖表
-                    with dpg.plot(label="Pressure Sensor", width=-1, height=-1):
+                    # 秤重傳感器圖表
+                    with dpg.plot(label="Weight Sensor", width=-1, height=-1):
                         dpg.add_plot_legend()
 
-                        dpg.add_plot_axis(dpg.mvXAxis, label="Time", tag="pressure_xaxis")
-                        with dpg.plot_axis(dpg.mvYAxis, label="Value", tag="pressure_yaxis"):
-                            pass
+                        dpg.add_plot_axis(dpg.mvXAxis, label="Time (s)", tag="xaxis_weight")
+                        with dpg.plot_axis(dpg.mvYAxis, label="Weight (g)", tag="yaxis_weight"):
+                            dpg.add_line_series([], [], label="Value", tag="series_weight")
 
         # 建立視窗
         dpg.create_viewport(title="Network", width=800, height=500)
@@ -187,8 +225,6 @@ class AppWindow:
 
         dpg.set_primary_window("primary_window", True)
         dpg.maximize_viewport()
-        dpg.start_dearpygui()
-        dpg.destroy_context()
 
 
     def load_font(self):
@@ -197,12 +233,12 @@ class AppWindow:
         with dpg.font_registry():
             font_path = ""
             if platform.system() == "Windows":
-                font_path = "C:/Windows/Fonts/msjh.ttc"    # 微軟正黑體
+                font_path = "C:/Windows/Fonts/consola.ttf"
             elif platform.system() == "Darwin":
-                font_path = "/System/Library/Fonts/PingFang.ttc"    # Mac 蘋方體
+                font_path = "/System/Library/Fonts/Menlo.ttc"
 
             if font_path and os.path.exists(font_path):
-                with dpg.font(font_path, 18) as default_font:    # 字體大小 : 18
+                with dpg.font(font_path, 16) as default_font:    # 字體大小 : 18
                     dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
                     dpg.add_font_range_hint(dpg.mvFontRangeHint_Chinese_Full)
 
@@ -256,11 +292,23 @@ class AppWindow:
         
         self.cnt_persec += 1
 
-        # 每接收十筆才輸出一次
-        if (self.cnt_persec % 10 == 0):    
+        # 每接收五筆才輸出一次
+        if (self.cnt_persec % 5 == 0):    
             output_data = self.processor.format_output(data, self.data_format)
             self.output_message(output_data)
 
+            # 將數據存入清單
+            weight = self.processor.extract_force_data(data)
+            self.plot_data_x.append(time.time() - self.start_time)
+            self.plot_data_y.append(weight)
+            dpg.fit_axis_data("yaxis_weight")
+            dpg.fit_axis_data("xaxis_weight")
+        
+
+    def update_plot(self):
+        """更新圖表數據"""
+        if len(self.plot_data_x) > 0:
+            dpg.set_value("series_weight", [list(self.plot_data_x), list(self.plot_data_y)])
 
     def cps_monitor(self):
         """更新 cnt/sec 的數值"""
@@ -286,4 +334,11 @@ class AppWindow:
 
 # 執行程式
 if __name__ == "__main__":
-    AppWindow()
+    app = AppWindow()
+
+    while dpg.is_dearpygui_running():
+        app.update_plot()
+        dpg.render_dearpygui_frame()
+    
+    dpg.destroy_context()
+
